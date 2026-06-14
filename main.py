@@ -5,8 +5,8 @@ from aiogram import Bot, Dispatcher, types
 from fastapi import FastAPI, Request
 
 # Leemos las credenciales desde el entorno seguro (Northflank las inyectará)
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+TOKEN = os.getenv("clave1")
+WEBHOOK_URL = os.getenv("clave2")
 
 # Inicializamos el bot y el despachador de aiogram
 bot = Bot(token=TOKEN)
