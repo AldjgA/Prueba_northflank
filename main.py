@@ -1,7 +1,7 @@
 import os
 
 from aiogram import Bot, Dispatcher, types
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 from google import genai
 
 # Credenciales inyectadas por el entorno
@@ -40,10 +40,10 @@ async def gemini_handler(message: types.Message):
 
 
 @app.post("/webhook")
-async def telegram_webhook(request: Request):
+async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     data = await request.json()
     update = types.Update(**data)
-    await dp.feed_update(bot=bot, update=update)
+    background_tasks.add_task(dp.feed_update, bot=bot, update=update)
     return {"status": "ok"}
 
 
