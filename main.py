@@ -17,7 +17,7 @@ app = FastAPI()
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Aquí debes colocar exactamente el nombre del modelo que te muestra AI Studio
-MODEL_ID = "gemini-3-flash-live"
+MODEL_ID = "gemma-4-31b-it"
 
 
 @dp.message()
