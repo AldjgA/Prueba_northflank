@@ -1,0 +1,11 @@
+/server
+/server.exe
+*.exe
+*.test
+*.out
+coverage.out
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db

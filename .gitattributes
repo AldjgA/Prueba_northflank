@@ -1,0 +1,16 @@
+# Normaliza finales de linea a LF. Critico para el Dockerfile: si se sube
+# con CRLF, el build en Linux falla con "no such file or directory".
+* text=auto eol=lf
+
+*.go          text eol=lf
+*.mod         text eol=lf
+*.sum         text eol=lf
+*.sql         text eol=lf
+*.md          text eol=lf
+Dockerfile    text eol=lf
+.dockerignore text eol=lf
+.gitignore    text eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary

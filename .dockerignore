@@ -1,0 +1,15 @@
+.git
+.gitignore
+__pycache__
+*.md
+*.log
+.env
+.env.*
+!.env.example
+backend-go
+server
+server.exe
+*.test
+coverage.out
+.DS_Store
+Thumbs.db
