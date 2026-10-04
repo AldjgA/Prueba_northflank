@@ -1,14 +1,15 @@
+# Contexto de build minimo. El Dockerfile solo copia go.mod, go.sum y los
+# archivos .go, asi que todo lo demas se queda fuera del contexto de build.
 .git
+.gitattributes
 .gitignore
-__pycache__
 *.md
-*.log
 .env
 .env.*
-!.env.example
-backend-go
+*_test.go
 server
 server.exe
+*.exe
 *.test
 coverage.out
 .DS_Store
