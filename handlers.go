@@ -47,19 +47,11 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /ready", s.handleReady)
 
-	// Con autenticacion y rate limit.
+	// Con autenticacion (`clave1`) y rate limit.
 	mux.HandleFunc("POST /chat", s.authMiddleware(s.handleChat))
 	mux.HandleFunc("POST /chat/stream", s.authMiddleware(s.handleChatStream))
 	mux.HandleFunc("GET /chat/{id}/history", s.authMiddleware(s.handleHistory))
 	mux.HandleFunc("DELETE /chat/{id}", s.authMiddleware(s.handleDelete))
-
-	// El tester consulta su propia cuota.
-	mux.HandleFunc("GET /me", s.authMiddleware(s.handleMe))
-
-	// Administracion: SOLO con `clave1`, nunca en modo abierto.
-	mux.HandleFunc("POST /admin/keys", s.adminMiddleware(s.handleCreateKey))
-	mux.HandleFunc("GET /admin/keys", s.adminMiddleware(s.handleListKeys))
-	mux.HandleFunc("DELETE /admin/keys/{id}", s.adminMiddleware(s.handleRevokeKey))
 
 	return mux
 }

@@ -39,15 +39,6 @@ type Config struct {
 	// --- Rate limit -------------------------------------------------------
 	RateLimitPerMin int
 
-	// --- Cuotas -----------------------------------------------------------
-	// GlobalDailyCap es el techo de peticiones al dia para TODO el servicio.
-	// Es la red de seguridad: aunque la autenticacion falle o alguien abuse,
-	// el gasto tiene un limite. 0 = sin tope.
-	GlobalDailyCap int
-	// DefaultDailyQuota es la cuota diaria que se asigna a una clave nueva
-	// si no se indica otra cosa.
-	DefaultDailyQuota int
-
 	// --- Base de datos ----------------------------------------------------
 	DBPoolMin        int32
 	DBPoolMax        int32
@@ -81,9 +72,6 @@ func LoadConfig() Config {
 		QueueTimeout:   envDuration("QUEUE_TIMEOUT_S", 30*time.Second),
 
 		RateLimitPerMin: envInt("RATE_LIMIT_PER_MIN", 60),
-
-		GlobalDailyCap:    envInt("GLOBAL_DAILY_CAP", 2000),
-		DefaultDailyQuota: envInt("DEFAULT_DAILY_QUOTA", 100),
 
 		DBPoolMin:        int32(envInt("DB_POOL_MIN", 1)),
 		DBPoolMax:        int32(envInt("DB_POOL_MAX", 5)),
