@@ -72,6 +72,8 @@ func newTestServer(gen Generator) *Server {
 	cfg.QueueTimeout = 2 * time.Second
 	cfg.RateLimitPerMin = 1000
 	cfg.Model = "gemini-3.5-flash-lite"
+	cfg.GlobalDailyCap = 2000
+	cfg.DefaultDailyQuota = 100
 
 	return &Server{
 		cfg:     cfg,
@@ -536,5 +538,314 @@ func TestConfigLeeLosSecretos(t *testing.T) {
 	}
 	if cfg.GeminiAPIKey != "api" {
 		t.Errorf("clave2 no se leyo: %q", cfg.GeminiAPIKey)
+	}
+}
+
+// --------------------------------------------------------------------------- //
+// Tokens de tester
+// --------------------------------------------------------------------------- //
+
+func TestGenerateToken(t *testing.T) {
+	token, hash, err := GenerateToken()
+	if err != nil {
+		t.Fatalf("error generando el token: %v", err)
+	}
+	if !strings.HasPrefix(token, tokenPrefix) {
+		t.Errorf("el token deberia empezar por %q: %q", tokenPrefix, token)
+	}
+	if len(token) != len(tokenPrefix)+64 { // 32 bytes en hexadecimal
+		t.Errorf("longitud inesperada: %d", len(token))
+	}
+	if hash != HashToken(token) {
+		t.Error("el hash devuelto no corresponde al token")
+	}
+	if strings.Contains(hash, token) {
+		t.Error("el hash no debe contener el token")
+	}
+
+	otro, _, err := GenerateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otro == token {
+		t.Error("se repitio el token: la entropia no es real")
+	}
+}
+
+func TestHashToken(t *testing.T) {
+	token := "mb_abc123"
+	a, b := HashToken(token), HashToken(token)
+
+	if a != b {
+		t.Error("HashToken no es determinista")
+	}
+	if a == token {
+		t.Error("el hash no puede ser igual al token")
+	}
+	if len(a) != 64 {
+		t.Errorf("SHA-256 en hex deberia tener 64 caracteres, tiene %d", len(a))
+	}
+	if HashToken("mb_abc124") == a {
+		t.Error("dos tokens distintos no pueden compartir hash")
+	}
+	// Los espacios sobrantes se ignoran: pasa al pegar un token con un salto de linea.
+	if HashToken("  "+token+"\n") != a {
+		t.Error("deberia ignorar los espacios alrededor del token")
+	}
+}
+
+func TestExtractToken(t *testing.T) {
+	casos := []struct {
+		nombre, apiKey, auth, quiero string
+	}{
+		{"X-API-Key", "mb_uno", "", "mb_uno"},
+		{"Bearer", "", "Bearer mb_dos", "mb_dos"},
+		{"bearer en minusculas", "", "bearer mb_tres", "mb_tres"},
+		{"X-API-Key gana sobre Authorization", "mb_primero", "Bearer mb_segundo", "mb_primero"},
+		{"sin credencial", "", "", ""},
+		{"Authorization que no es Bearer", "", "Basic abc", ""},
+	}
+	for _, c := range casos {
+		t.Run(c.nombre, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/", nil)
+			if c.apiKey != "" {
+				req.Header.Set("X-API-Key", c.apiKey)
+			}
+			if c.auth != "" {
+				req.Header.Set("Authorization", c.auth)
+			}
+			if got := extractToken(req); got != c.quiero {
+				t.Errorf("extractToken = %q, queria %q", got, c.quiero)
+			}
+		})
+	}
+}
+
+// --------------------------------------------------------------------------- //
+// Cuotas
+// --------------------------------------------------------------------------- //
+
+func TestCheckQuotas(t *testing.T) {
+	s := newTestServer(&fakeGen{})
+
+	casos := []struct {
+		nombre string
+		ident  Identity
+		quiero int // 0 = sin error
+	}{
+		{"dentro de cuota", Identity{Kind: KindKey, DailyQuota: 100, UsedToday: 50}, 0},
+		{"justo en el limite", Identity{Kind: KindKey, DailyQuota: 100, UsedToday: 100}, 0},
+		{"uno por encima del limite", Identity{Kind: KindKey, DailyQuota: 100, UsedToday: 101}, 429},
+		{"cuota 0 significa sin limite", Identity{Kind: KindKey, UsedToday: 99999}, 0},
+		{"clave de servicio no tiene cuota", Identity{Kind: KindService}, 0},
+	}
+	for _, c := range casos {
+		t.Run(c.nombre, func(t *testing.T) {
+			ident := c.ident
+			_, err := s.checkQuotas(&ident)
+			if c.quiero == 0 {
+				if err != nil {
+					t.Errorf("no esperaba error: %v", err)
+				}
+				return
+			}
+			var ae *authError
+			if !errors.As(err, &ae) {
+				t.Fatalf("esperaba authError, obtuve %v", err)
+			}
+			if ae.code != c.quiero {
+				t.Errorf("codigo = %d, queria %d", ae.code, c.quiero)
+			}
+			if ae.retryAfter == "" {
+				t.Error("una cuota agotada deberia indicar Retry-After")
+			}
+		})
+	}
+}
+
+func TestCheckGlobalCap(t *testing.T) {
+	s := newTestServer(&fakeGen{})
+
+	if _, err := s.checkGlobalCap(&Identity{GlobalToday: 2000}); err != nil {
+		t.Errorf("justo en el tope no deberia cortar: %v", err)
+	}
+
+	_, err := s.checkGlobalCap(&Identity{GlobalToday: 2001})
+	var ae *authError
+	if !errors.As(err, &ae) {
+		t.Fatalf("esperaba authError, obtuve %v", err)
+	}
+	if ae.code != http.StatusServiceUnavailable {
+		t.Errorf("codigo = %d, queria 503", ae.code)
+	}
+
+	s.cfg.GlobalDailyCap = 0
+	if _, err := s.checkGlobalCap(&Identity{GlobalToday: 999999}); err != nil {
+		t.Errorf("con el tope desactivado no deberia cortar nunca: %v", err)
+	}
+}
+
+func TestSetQuotaHeaders(t *testing.T) {
+	rec := httptest.NewRecorder()
+	setQuotaHeaders(rec, &Identity{
+		Kind: KindKey, DailyQuota: 100, UsedToday: 30, GlobalToday: 500,
+	}, 2000)
+
+	for nombre, quiero := range map[string]string{
+		"X-Quota-Limit":      "100",
+		"X-Quota-Used":       "30",
+		"X-Quota-Remaining":  "70",
+		"X-Global-Remaining": "1500",
+	} {
+		if got := rec.Header().Get(nombre); got != quiero {
+			t.Errorf("%s = %q, queria %q", nombre, got, quiero)
+		}
+	}
+
+	// Si la cuota ya esta agotada, "remaining" nunca debe ser negativo.
+	rec2 := httptest.NewRecorder()
+	setQuotaHeaders(rec2, &Identity{Kind: KindKey, DailyQuota: 10, UsedToday: 25}, 0)
+	if got := rec2.Header().Get("X-Quota-Remaining"); got != "0" {
+		t.Errorf("X-Quota-Remaining = %q, queria 0 (nunca negativo)", got)
+	}
+
+	// La clave de servicio no expone cuota propia.
+	rec3 := httptest.NewRecorder()
+	setQuotaHeaders(rec3, &Identity{Kind: KindService}, 2000)
+	if rec3.Header().Get("X-Quota-Limit") != "" {
+		t.Error("la clave de servicio no deberia exponer cuota")
+	}
+}
+
+// --------------------------------------------------------------------------- //
+// Modo abierto y administracion
+// --------------------------------------------------------------------------- //
+
+func TestModoAbierto(t *testing.T) {
+	s := newTestServer(&fakeGen{reply: "ok"})
+	s.cfg.APIToken = "" // sin clave1
+	s.store = nil
+
+	if rec := do(t, s, "POST", "/chat", `{"message":"hola"}`, nil); rec.Code != http.StatusOK {
+		t.Errorf("sin clave1 y sin credencial deberia pasar: %d", rec.Code)
+	}
+
+	// Pero si mandas una credencial invalida, te lo decimos: mejor que enterarte.
+	if rec := do(t, s, "POST", "/chat", `{"message":"hola"}`,
+		map[string]string{"X-API-Key": "mb_no_existe"}); rec.Code != http.StatusUnauthorized {
+		t.Errorf("credencial invalida en modo abierto: %d, queria 401", rec.Code)
+	}
+}
+
+func TestAdminDeshabilitadoSinClave1(t *testing.T) {
+	s := newTestServer(&fakeGen{})
+	s.cfg.APIToken = ""
+
+	if rec := do(t, s, "GET", "/admin/keys", "", nil); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("sin clave1: %d, queria 503", rec.Code)
+	}
+	if rec := do(t, s, "POST", "/admin/keys", `{"label":"x"}`, nil); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("sin clave1 al crear: %d, queria 503", rec.Code)
+	}
+}
+
+func TestAdminDeshabilitadoSinBaseDeDatos(t *testing.T) {
+	s := newTestServer(&fakeGen{}) // store = nil
+
+	if rec := do(t, s, "GET", "/admin/keys", "", authHeader); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("sin base de datos: %d, queria 503", rec.Code)
+	}
+}
+
+func TestAdminRechazaClaveDeServicioIncorrecta(t *testing.T) {
+	s := newTestServer(&fakeGen{})
+	// Un Store con pool nil basta: el middleware comprueba la credencial
+	// antes de que el handler llegue a tocar la base de datos.
+	s.store = &Store{}
+
+	if rec := do(t, s, "GET", "/admin/keys", "",
+		map[string]string{"X-API-Key": "clave-mala"}); rec.Code != http.StatusUnauthorized {
+		t.Errorf("clave incorrecta: %d, queria 401", rec.Code)
+	}
+
+	// Un token de tester tampoco sirve para administrar, solo `clave1`.
+	if rec := do(t, s, "GET", "/admin/keys", "",
+		map[string]string{"X-API-Key": "mb_token_de_tester"}); rec.Code != http.StatusUnauthorized {
+		t.Errorf("token de tester en admin: %d, queria 401", rec.Code)
+	}
+}
+
+func TestRevokeConIdInvalido(t *testing.T) {
+	s := newTestServer(&fakeGen{})
+	s.store = &Store{}
+
+	for _, id := range []string{"abc", "-3", "0"} {
+		if rec := do(t, s, "DELETE", "/admin/keys/"+id, "", authHeader); rec.Code != http.StatusBadRequest {
+			t.Errorf("id=%q: %d, queria 400", id, rec.Code)
+		}
+	}
+}
+
+// --------------------------------------------------------------------------- //
+// GET /me
+// --------------------------------------------------------------------------- //
+
+func TestMeRequiereAutenticacion(t *testing.T) {
+	s := newTestServer(&fakeGen{})
+
+	if rec := do(t, s, "GET", "/me", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("/me sin credencial: %d, queria 401", rec.Code)
+	}
+}
+
+func TestMeDevuelveLaCuotaDelTester(t *testing.T) {
+	s := newTestServer(&fakeGen{})
+	ident := &Identity{
+		Kind: KindKey, KeyID: 7, Label: "ana",
+		DailyQuota: 100, UsedToday: 42, GlobalToday: 500,
+	}
+
+	req := httptest.NewRequest("GET", "/me", nil)
+	req = req.WithContext(context.WithValue(req.Context(), identityCtxKey, ident))
+	rec := httptest.NewRecorder()
+	s.handleMe(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("respuesta no parseable: %v", err)
+	}
+	if body["label"] != "ana" {
+		t.Errorf("label = %v", body["label"])
+	}
+	if body["daily_quota"] != float64(100) {
+		t.Errorf("daily_quota = %v", body["daily_quota"])
+	}
+	if body["used_today"] != float64(42) {
+		t.Errorf("used_today = %v", body["used_today"])
+	}
+	if body["remaining"] != float64(58) {
+		t.Errorf("remaining = %v, queria 58", body["remaining"])
+	}
+}
+
+func TestIdentityFromSinContextoNoRevienta(t *testing.T) {
+	ident := IdentityFrom(context.Background())
+	if ident == nil {
+		t.Fatal("IdentityFrom no debe devolver nil")
+	}
+	if ident.Kind != KindNone {
+		t.Errorf("kind = %q, queria %q", ident.Kind, KindNone)
+	}
+}
+
+func TestLooksLikeToken(t *testing.T) {
+	if !LooksLikeToken("mb_" + strings.Repeat("a", 64)) {
+		t.Error("deberia reconocer un token nuestro")
+	}
+	if LooksLikeToken("eyJhbGciOiJIUzI1NiJ9.abc") {
+		t.Error("no deberia confundir un JWT con un token nuestro")
 	}
 }
